@@ -2,6 +2,7 @@ import asyncio
 import ctypes
 import json
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -25,15 +26,20 @@ def idle_seconds():
 
 
 def measure(config):
-    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+    windows_ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    shell = str(windows_ps) if windows_ps.is_file() else (shutil.which("pwsh") or "powershell.exe")
+    command = [shell, "-NoProfile", "-NonInteractive", "-Command",
                Path(__file__).with_name("measure.ps1").read_text(encoding="utf-8")]
-    raw = subprocess.check_output(command, timeout=6, creationflags=subprocess.CREATE_NO_WINDOW,
-                                  stderr=subprocess.DEVNULL)
-    rows = json.loads(raw)
+    result = subprocess.run(command, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW,
+                            capture_output=True, encoding="utf-8-sig", errors="replace")
+    if result.returncode:
+        raise ValueError(result.stderr.strip()[:1000] or "Windows GPU counters failed")
+    rows = json.loads(result.stdout)
+    names = [row["Name"] for row in rows]
     if config.get("adapter"):
         rows = [row for row in rows if row["Name"] == config["adapter"]]
     if len(rows) != 1:
-        raise ValueError("Select one adapter in the agent configuration")
+        raise ValueError("Expected one GPU adapter. Available: " + (", ".join(names) or "(none)"))
     used = int(rows[0]["DedicatedUsage"]) / 1024**2
     return max(0, int(config["capacity_mib"] - used)), int(rows[0]["Load"])
 
@@ -86,6 +92,7 @@ class Agent:
                 "available": available, "user": self.user, "active_model": self.model}
 
     async def monitor(self, app):
+        previous_error = None
         while True:
             try:
                 self.game = any((p.info["name"] or "").casefold() in self.games
@@ -94,10 +101,17 @@ class Agent:
                     self.job.cancel()
                 self.free, self.gpu_load = await asyncio.to_thread(measure, self.c)
                 self.measured = time.monotonic()
+                if previous_error:
+                    print("GPU telemetry restored.", flush=True)
+                previous_error = None
                 if self.job and self.free < self.c["reserve_mib"]:
                     self.job.cancel()
-            except (OSError, ValueError, subprocess.SubprocessError, psutil.Error, KeyError, TypeError):
+            except (OSError, ValueError, subprocess.SubprocessError, psutil.Error, KeyError, TypeError) as exc:
                 self.measured = 0
+                detail = str(exc)
+                if detail != previous_error:
+                    print("GPU telemetry:", detail, flush=True)
+                previous_error = detail
             try:
                 async with app["session"].get(self.lm_url + "/v1/models",
                                                headers=self.lm_headers(), timeout=3) as reply:
