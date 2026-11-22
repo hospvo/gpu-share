@@ -25,6 +25,26 @@ def idle_seconds():
     return ((ctypes.windll.kernel32.GetTickCount() - info.tick) & 0xffffffff) // 1000
 
 
+def named_adapter_rows(rows, description):
+    import winreg
+
+    # DirectX retains older LUIDs. Only consider IDs present in the live sample.
+    descriptions = {}
+    access = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\DirectX", 0, access) as root:
+        for index in range(winreg.QueryInfoKey(root)[0]):
+            try:
+                with winreg.OpenKey(root, winreg.EnumKey(root, index)) as entry:
+                    name = winreg.QueryValueEx(entry, "Description")[0]
+                    luid = winreg.QueryValueEx(entry, "AdapterLuid")[0]
+            except FileNotFoundError:
+                continue
+            prefix = f"luid_0x{luid >> 32:08x}_0x{luid & 0xffffffff:08x}"
+            descriptions.setdefault(prefix, set()).add(name.casefold())
+    return [row for row in rows if descriptions.get(row["Name"].casefold().partition("_phys_")[0])
+            == {description.casefold()}]
+
+
 def measure(config):
     windows_ps = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     shell = str(windows_ps) if windows_ps.is_file() else (shutil.which("pwsh") or "powershell.exe")
@@ -37,7 +57,9 @@ def measure(config):
     rows = json.loads(result.stdout)
     names = [row["Name"] for row in rows]
     if config.get("adapter"):
-        rows = [row for row in rows if row["Name"] == config["adapter"]]
+        rows = [row for row in rows if row["Name"].casefold() == config["adapter"].casefold()]
+    elif config.get("adapter_name"):
+        rows = named_adapter_rows(rows, config["adapter_name"])
     if len(rows) != 1:
         raise ValueError("Expected one GPU adapter. Available: " + (", ".join(names) or "(none)"))
     used = int(rows[0]["DedicatedUsage"]) / 1024**2
