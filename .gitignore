@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+private/
+paused
+*.local.json
+
